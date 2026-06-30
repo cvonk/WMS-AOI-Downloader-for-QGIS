@@ -146,8 +146,11 @@ def fetch_one_tile(params, opts, tile, out_path, logger):
         raise TileFetchError(f"Network error: {err}")
     if status in (404, 204) or not body:
         return None                       # missing tile → legitimate gap
-    if status == 429:
-        raise TileFetchError("HTTP 429.",
+    if status in (429, 403):
+        # Some tile servers use 403 to signal rate-limiting / over-use, so treat
+        # it as a throttle: back off and retry. A genuinely forbidden resource
+        # still fails once the per-tile attempt cap is reached.
+        raise TileFetchError(f"HTTP {status} (rate-limited?).",
                              retry_after=engine.parse_retry_after(headers.get("retry-after")),
                              is_throttle=True)
     if status in (500, 503):
