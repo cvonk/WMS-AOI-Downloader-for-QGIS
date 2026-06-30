@@ -7,14 +7,14 @@
 
 ## Installation
 
-Copying this directory to your `$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\` directory.
+Copy this directory into your `$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\` folder.
 
-Plugins ▸ Plugin Manager ▸ Manage and Install Plugins ▸ Installed > WMS AOI Downloader
-- put a checkmark before the WMS AOI Downloader plugin to activate it. 
+Plugins ▸ Plugin Manager ▸ Manage and Install Plugins ▸ Installed ▸ WMS AOI Downloader
+- Put a checkmark next to the WMS AOI Downloader plugin to activate it.
 
 ## Usage
 
-Ensure the project and layer Coordinate Reference Systems corresponds with your WMS source. 
+Ensure the project and layer Coordinate Reference Systems correspond with your WMS source.
 
 To change the project CRS:
 - Bottom-right > EPSG:xx
@@ -31,7 +31,7 @@ In QGIS
     - Double-click
       - Italy Geoportale Nazionale Ortho (1m) > Orthofoto a colori anno 2012 > Copertura .. WGS84 - UTM32
 
-### Set an export boundary (e.g. ~10x10 km e.g.)
+### Set an export boundary (e.g. ~10x10 km)
 
 Layer ▸ Create Layer ▸ New Temporary Scratch Layer
   - Name = Area of Interest (EPSG:32632)
@@ -43,13 +43,13 @@ Center your Area of Interest in the middle of the canvas
 
 Set the canvas scale to about 1:30,000	
 
-Layers Panel on the left-size > Area of Interest (EPSG:32632)
+Layers Panel on the left side ▸ Area of Interest (EPSG:32632)
   - Make sure the Editing mode is enabled in the top main toolbar (icon looks like a yellow pencil)
   - Use the Add Polygon Feature button on the Main (Editing) toolbar to draw a box around your Area of Interest (the icon looks like an irregular green shape with a small starburst)
     - Left-click on the map canvas to place your first corner
     - Left-click to place the other corners
     - Right-click anywhere on the canvas to finish drawing
-    T- oggle the Edit mode to disable (and save the changes to the layer)
+    - Toggle the Edit mode off to disable it (and save the changes to the layer)
     
 ## Exporting to GeoTIFF
 
@@ -59,7 +59,7 @@ Web ▸ WMS AOI Downloader…
     - AOI polygon layer = Area of Interest (EPSG:32632)
     - Tile size = 1024
     - Resolution = 0.5
-    - Output path = C:\User\you\output.tiff
+    - Output path = C:\Users\you\output.tif
 
 ## Q&A
 
@@ -67,7 +67,7 @@ Web ▸ WMS AOI Downloader…
 A: Verify that all the Resolution and Coordinate Reference Systems match your source.
 
 **Q: Why are some tiles missing?**
-A: Most likely this is due to the rate not adapting to servier side throtling.
+A: Most likely this is due to the request rate not adapting to server-side throttling.
 
 **Q: What version of QGIS is this for?**
 A: I wrote this for QGIS 3.40.8.
