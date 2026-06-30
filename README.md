@@ -64,7 +64,7 @@ Web ▸ WMS AOI Downloader…
 ## Q&A
 
 **Q: Why is my map blurry?**
-A: Verify that all the Resulution and Coordinate Reference Systems match your source.
+A: Verify that all the Resolution and Coordinate Reference Systems match your source.
 
 **Q: Why are some tiles missing?**
 A: Most likely this is due to the rate not adapting to servier side throtling.
