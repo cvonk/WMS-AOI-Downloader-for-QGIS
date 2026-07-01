@@ -50,7 +50,9 @@ SPEEDUP_FACTOR           = 0.85
 SLOWDOWN_FACTOR          = 2.0
 SUCCESSES_BEFORE_SPEEDUP = 3
 REQUEST_TIMEOUT_MS       = 60_000
-CONCURRENCY              = 4       # parallel tile fetches (dispatch still paced by the throttle)
+CONCURRENCY              = 4       # default parallel tile fetches; a source may
+                                   # override via a CONCURRENCY attribute, and the
+                                   # dialog lets the user set it per run
 
 CLEANUP_TILES_AFTER_MOSAIC = False
 WORK_SUBDIR_NAME = "aoi_download"
@@ -424,7 +426,7 @@ def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
 class AoiDownloadTask(QgsTask):
     def __init__(self, source, layer, aoi_layer, params, opts,
                  native_crs, out_crs, output_path=None, resample="bilinear",
-                 clip=False):
+                 clip=False, concurrency=CONCURRENCY):
         super().__init__(TASK_DESC, QgsTask.CanCancel)
         self._source       = source
         self._params       = params
@@ -435,6 +437,7 @@ class AoiDownloadTask(QgsTask):
         self._output_path  = output_path or None
         self._resample     = resample or "bilinear"
         self._clip         = bool(clip)
+        self._concurrency  = max(1, int(concurrency))
 
         project = QgsProject.instance()
         base_dir = (os.path.dirname(project.fileName())
@@ -502,12 +505,13 @@ class AoiDownloadTask(QgsTask):
                        for tid, spec, attempts in queue.pending_tiles()]
             in_flight = {}          # future -> [tid, tile, attempts]
             processed = 0
+            logger.info("Fetching with concurrency=%d", self._concurrency)
 
-            with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
+            with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
                 while (pending or in_flight) and not self.isCanceled():
                     # Fill the pool, pacing each dispatch with the throttle so
                     # the overall request rate stays adaptive.
-                    while pending and len(in_flight) < CONCURRENCY:
+                    while pending and len(in_flight) < self._concurrency:
                         throttle.wait(self.isCanceled)
                         if self.isCanceled():
                             break
@@ -653,7 +657,7 @@ class AoiDownloadTask(QgsTask):
 # ─────────────────────────────────────────────
 def run(layer=None, aoi_layer=None, opts=None, out_crs=None,
         output_path=None, temporary=False, resample="bilinear", clip=False,
-        on_finished=None):
+        concurrency=None, on_finished=None):
     """
     Start a download task. The source backend (WMS / XYZ) is auto-detected from
     `layer`. `opts` is the source-specific settings dict
@@ -700,8 +704,9 @@ def run(layer=None, aoi_layer=None, opts=None, out_crs=None,
     print(f"[AOI Downloader] Source : {source.SOURCE_NAME}")
     print(f"[AOI Downloader] Native : {native}   Output CRS: {out_crs}")
 
+    conc = int(concurrency) if concurrency else getattr(source, "CONCURRENCY", CONCURRENCY)
     task = AoiDownloadTask(source, layer, aoi_layer, params, opts,
-                           native, out_crs, output_path, resample, clip)
+                           native, out_crs, output_path, resample, clip, conc)
 
     def _finished(success):
         release_logger()

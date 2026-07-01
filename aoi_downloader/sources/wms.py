@@ -15,6 +15,7 @@ from ..tilemath import wms_grid_dims
 
 SOURCE_NAME = "WMS"
 INITIAL_DELAY_SEC = 1.0        # WMS servers are often stricter; start gently
+CONCURRENCY = 2               # …and are less tolerant of many parallel connections
 
 PREFERRED_FORMATS = [
     ["image/tiff", "geotiff", "image/geo+tiff", "application/x-geotiff"],

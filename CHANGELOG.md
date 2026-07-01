@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
+### Added
+- Configurable "Parallel downloads" (concurrency) in the dialog, remembered
+  per run. WMS now defaults to 2 (stricter servers reject many simultaneous
+  connections); XYZ/WMTS default to 4.
 
 ## [1.1.1] - 2026-06-30
 ### Changed

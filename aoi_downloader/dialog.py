@@ -27,6 +27,7 @@ SETTINGS_GROUP = "aoi_downloader"
 DEFAULT_TILE_PIXELS = 1024
 DEFAULT_RESOLUTION  = 0.5
 DEFAULT_ZOOM        = 18
+DEFAULT_CONCURRENCY = 4
 
 # Ask for confirmation above this estimated tile count.
 WARN_TILE_COUNT = 5000
@@ -147,6 +148,13 @@ class AoiDialog(QDialog):
         self.clip_check = QCheckBox("Clip output to the AOI polygon")
         form.addRow("", self.clip_check)
 
+        self.conc_spin = QSpinBox()
+        self.conc_spin.setRange(1, 16)
+        self.conc_spin.setToolTip(
+            "Number of tiles fetched in parallel. Lower it (1–2) for strict "
+            "servers that reject or throttle many simultaneous connections.")
+        form.addRow("Parallel downloads:", self.conc_spin)
+
         self.out_widget = OutputDestinationWidget()
         form.addRow("Output:", self.out_widget)
 
@@ -204,6 +212,7 @@ class AoiDialog(QDialog):
                     QgsCoordinateReferenceSystem(src.default_out_crs(params)))
             except Exception:
                 pass
+            self.conc_spin.setValue(getattr(src, "CONCURRENCY", DEFAULT_CONCURRENCY))
         self._last_source = name
         self._update_estimate()
 
@@ -315,6 +324,7 @@ class AoiDialog(QDialog):
         out_crs = s.value(f"{g}/out_crs", "")
         if out_crs:
             self.crs_widget.setCrs(QgsCoordinateReferenceSystem(out_crs))
+        self.conc_spin.setValue(int(s.value(f"{g}/concurrency", DEFAULT_CONCURRENCY)))
         self._last_source = self._current_source_name()
 
     def _save_state(self):
@@ -328,6 +338,7 @@ class AoiDialog(QDialog):
         s.setValue(f"{g}/output_path", self.out_widget.file_path() or "")
         s.setValue(f"{g}/resample", self.resample_combo.currentData())
         s.setValue(f"{g}/clip", self.clip_check.isChecked())
+        s.setValue(f"{g}/concurrency", self.conc_spin.value())
         ly, al = self.layer_combo.currentLayer(), self.aoi_combo.currentLayer()
         s.setValue(f"{g}/layer_id", ly.id() if ly else "")
         s.setValue(f"{g}/aoi_layer_id", al.id() if al else "")
@@ -366,4 +377,6 @@ class AoiDialog(QDialog):
         out_path = self.out_widget.file_path()
         resample = self.resample_combo.currentData()
         clip = self.clip_check.isChecked()
-        return (layer, aoi, opts, out_crs, out_path, temporary, resample, clip)
+        concurrency = self.conc_spin.value()
+        return (layer, aoi, opts, out_crs, out_path, temporary, resample, clip,
+                concurrency)
