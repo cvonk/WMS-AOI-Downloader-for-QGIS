@@ -11,7 +11,7 @@ from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 from qgis.core import Qgis, QgsMessageLog
 
-from .dialog import AoiDialog
+from .dialog import BasemapTileDialog
 from . import engine
 
 # "web" -> Web menu (convention for web-service tools); "plugins" -> Plugins menu
@@ -19,7 +19,7 @@ MENU = "web"
 MENU_TITLE = "Basemap Tile Downloader"
 
 
-class AoiDownloaderPlugin:
+class BasemapTileDownloaderPlugin:
     def __init__(self, iface):
         self.iface = iface
         self.action = None
@@ -44,7 +44,7 @@ class AoiDownloaderPlugin:
         self.action = None
 
     def show_dialog(self):
-        dlg = AoiDialog(self.iface.mapCanvas(), self.iface.mainWindow())
+        dlg = BasemapTileDialog(self.iface.mapCanvas(), self.iface.mainWindow())
         if not dlg.exec():
             return
 

@@ -85,7 +85,7 @@ class OutputDestinationWidget(QWidget):
         self.edit.setText(path or "")
 
 
-class AoiDialog(QDialog):
+class BasemapTileDialog(QDialog):
     def __init__(self, canvas=None, parent=None):
         super().__init__(parent)
         self._canvas = canvas
@@ -115,6 +115,9 @@ class AoiDialog(QDialog):
         self.extent_widget.extentChanged.connect(self._update_estimate)
         self.extent_widget.extentChanged.connect(self._update_zoom_label)
         form.addRow("Extent to render:", self.extent_widget)
+
+        self.clip_check = QCheckBox("Crop output to the exact extent")
+        form.addRow("", self.clip_check)
 
         # WMS-only rows ------------------------------------------------------
         self.tile_lbl  = QLabel("Tile size (px):")
@@ -155,9 +158,6 @@ class AoiDialog(QDialog):
         self.resample_combo.addItem("None (keep native CRS, no reprojection)", "none")
         self.resample_combo.currentIndexChanged.connect(self._sync_resample)
         form.addRow("Reproject sampling:", self.resample_combo)
-
-        self.clip_check = QCheckBox("Crop output to the exact extent")
-        form.addRow("", self.clip_check)
 
         self.out_widget = OutputDestinationWidget()
         form.addRow("Output:", self.out_widget)
@@ -222,6 +222,7 @@ class AoiDialog(QDialog):
         self._set_row_visible(self.zoom_lbl, self.zoom_spin, is_zoom)
         # The m/px note only applies to XYZ's fixed Web-Mercator grid.
         self._set_row_visible(self.zoom_res_lbl, self.zoom_res_info, name == "XYZ")
+        self._clamp_zoom_range(name)
         self._update_zoom_label()
 
         # On a source-type change, default the output CRS to that source's native.
@@ -238,21 +239,38 @@ class AoiDialog(QDialog):
         self._last_source = name
         self._update_estimate()
 
-    def _aoi_center_lat(self):
+    def _clamp_zoom_range(self, name):
+        """Limit the zoom spinner to what the layer serves. XYZ layers advertise
+        zmin/zmax in their source; WMTS addresses matrices by index, so fall back
+        to the widest range (build_tile_grid clamps to the real matrix count)."""
+        lo, hi = 0, 22
+        if name == "XYZ":
+            layer = self.layer_combo.currentLayer()
+            try:
+                p = engine.source_for(layer).extract_params(layer)   # no network
+                zmin, zmax = int(p.get("zmin", 0)), int(p.get("zmax", 22))
+                if zmin <= zmax:
+                    lo, hi = zmin, zmax
+            except Exception:
+                pass
+        if (lo, hi) != (self.zoom_spin.minimum(), self.zoom_spin.maximum()):
+            self.zoom_spin.setRange(lo, hi)
+
+    def _extent_center_lat(self):
         """Latitude (°) of the extent's centre, or None."""
         bb = self._extent_bbox_in(QgsCoordinateReferenceSystem("EPSG:4326"))
         return None if bb is None else bb.center().y()
 
     def _update_zoom_label(self, *args):
         z = self.zoom_spin.value()
-        lat = self._aoi_center_lat()
+        lat = self._extent_center_lat()
         if lat is None:
             self.zoom_res_info.setText(
                 f"≈ {tilemath.tile_resolution_m(z):.3f} m/px at the equator")
         else:
             self.zoom_res_info.setText(
                 f"≈ {tilemath.tile_resolution_m_at_lat(z, lat):.3f} m/px "
-                f"at the AOI (~{lat:.1f}°)")
+                f"at the extent (~{lat:.1f}°)")
 
     # ── tile-count estimate ───────────────────────────────────────────────────
     def _extent_bbox_in(self, target_crs):
@@ -273,7 +291,7 @@ class AoiDialog(QDialog):
             return None
 
     def _estimate_tiles(self):
-        """Upper-bound tile count over the AOI bounding box (no polygon
+        """Upper-bound tile count over the extent bounding box (no polygon
         intersection), or None if it can't be computed yet."""
         layer = self.layer_combo.currentLayer()
         name  = self._current_source_name()
@@ -363,14 +381,23 @@ class AoiDialog(QDialog):
 
     def accept(self):
         n = self._estimate_tiles()
-        if n and n > WARN_TILE_COUNT:
+        name = self._current_source_name()
+        # WMTS tile counts can't be estimated without fetching capabilities, so
+        # its estimate is always None; still surface the ToS reminder there.
+        large = bool(n and n > WARN_TILE_COUNT)
+        unbounded_wmts = (name == "WMTS" and n is None)
+        if large or unbounded_wmts:
+            count_line = (
+                f"This will download roughly {n:,} tiles, which may be slow and "
+                f"put load on the server.\n\n" if large else
+                "The tile count can't be estimated in advance for WMTS, but a fine "
+                "zoom level over a large extent can be a very large download.\n\n")
             reply = QMessageBox.question(
                 self, "Large download",
-                f"This will download roughly {n:,} tiles, which may be slow and "
-                f"put load on the server.\n\n"
-                f"Bulk-downloading tiles may violate the provider's Terms of "
-                f"Service (e.g. Google, Bing, Esri). Make sure your intended use "
-                f"is permitted before continuing.\n\nContinue?",
+                count_line +
+                "Bulk-downloading tiles may violate the provider's Terms of "
+                "Service (e.g. Google, Bing, Esri). Make sure your intended use "
+                "is permitted before continuing.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply != QMessageBox.Yes:
                 return          # keep the dialog open

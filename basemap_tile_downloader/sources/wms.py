@@ -148,7 +148,7 @@ def prepare(params, opts, logger):
 # ─────────────────────────────────────────────
 # TILE GRID
 # ─────────────────────────────────────────────
-def build_tile_grid(aoi_geom, aoi_crs, params, opts, logger):
+def build_tile_grid(extent_geom, extent_crs, params, opts, logger):
     tile_pixels = int(opts.get("tile_pixels", 1024))
     resolution  = float(opts.get("resolution", 0.5))
 
@@ -157,8 +157,8 @@ def build_tile_grid(aoi_geom, aoi_crs, params, opts, logger):
         raise DownloaderError(f"Request CRS '{params['crs']}' is invalid.")
 
     ctx     = QgsProject.instance().transformContext()
-    src_crs = QgsCoordinateReferenceSystem(aoi_crs)
-    region  = QgsGeometry(aoi_geom)
+    src_crs = QgsCoordinateReferenceSystem(extent_crs)
+    region  = QgsGeometry(extent_geom)
     if src_crs != req_crs and region.transform(
             QgsCoordinateTransform(src_crs, req_crs, ctx)) != 0:
         raise DownloaderError("Could not reproject the extent to the request CRS.")

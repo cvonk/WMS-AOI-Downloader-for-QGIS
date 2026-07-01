@@ -3,5 +3,5 @@
 
 
 def classFactory(iface):
-    from .plugin import AoiDownloaderPlugin
-    return AoiDownloaderPlugin(iface)
+    from .plugin import BasemapTileDownloaderPlugin
+    return BasemapTileDownloaderPlugin(iface)

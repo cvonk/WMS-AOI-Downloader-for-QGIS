@@ -15,12 +15,13 @@ A "source" module exposes:
     prepare(params, opts, logger) -> None        # optional (WMS caps/format)
     native_crs(params, opts) -> str
     default_out_crs(params) -> str
-    build_tile_grid(aoi_geom, aoi_crs, params, opts, logger) -> list[dict]  # each has "id"
+    build_tile_grid(extent_geom, extent_crs, params, opts, logger) -> list[dict]  # each has "id"
     fetch_one_tile(params, opts, tile, out_path, logger) -> path|None
     fingerprint_parts(params, opts) -> list
 """
 
 import os, json, sqlite3, logging, time, traceback, hashlib, uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime
 
@@ -55,7 +56,7 @@ CONCURRENCY              = 4       # default parallel tile fetches; a source may
                                    # dialog lets the user set it per run
 
 CLEANUP_TILES_AFTER_MOSAIC = False
-WORK_SUBDIR_NAME = "aoi_download"
+WORK_SUBDIR_NAME = "basemap_tile_downloader"
 LOG_TAB          = "Basemap Tile Downloader"
 TASK_DESC        = "Basemap tile download"
 
@@ -142,7 +143,11 @@ def release_logger():
 def blocking_get(url, timeout_ms=REQUEST_TIMEOUT_MS):
     req    = QgsBlockingNetworkRequest()
     qt_req = QNetworkRequest(QUrl(url))
-    qt_req.setHeader(QNetworkRequest.UserAgentHeader, b"QGIS-AOI-Downloader/1.0")
+    qt_req.setHeader(QNetworkRequest.UserAgentHeader, b"QGIS-Basemap-Tile-Downloader/1.0")
+    try:
+        qt_req.setTransferTimeout(int(timeout_ms))    # Qt 5.15+ (QGIS 3.16+)
+    except (AttributeError, TypeError):
+        pass
     err_code = req.get(qt_req, forceRefresh=True)
 
     reply  = req.reply()
@@ -154,9 +159,18 @@ def blocking_get(url, timeout_ms=REQUEST_TIMEOUT_MS):
             bytes(reply.rawHeader(h)).decode("latin1")
 
     error_str, timed_out = None, False
-    if err_code == QgsBlockingNetworkRequest.NetworkError:
+    # QgsBlockingNetworkRequest reports a transfer timeout via its own
+    # TimeoutError code; older builds fold it into NetworkError with a
+    # "timeout" errorString. Handle both so a timed-out tile is retried
+    # rather than being mistaken for an empty response (a permanent gap).
+    timeout_code = getattr(QgsBlockingNetworkRequest, "TimeoutError", None)
+    if timeout_code is not None and err_code == timeout_code:
+        timed_out = True
+        error_str = reply.errorString() or "Request timed out."
+    elif err_code == QgsBlockingNetworkRequest.NetworkError:
         error_str = reply.errorString()
-        if "timeout" in (error_str or "").lower():
+        low = (error_str or "").lower()
+        if "timeout" in low or "timed out" in low:
             timed_out = True
     elif err_code == QgsBlockingNetworkRequest.ServerExceptionError:
         error_str = reply.errorString()
@@ -173,7 +187,12 @@ def parse_retry_after(value):
     try:
         from email.utils import parsedate_to_datetime
         dt = parsedate_to_datetime(value.strip())
-        return max(0.0, (dt - datetime.utcnow().replace(tzinfo=dt.tzinfo)).total_seconds())
+        if dt is None:
+            return None
+        # Compare against "now" in the same awareness/zone as the parsed date,
+        # so a non-GMT offset (or a naive date) yields the right delay.
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        return max(0.0, (dt - now).total_seconds())
     except Exception:
         return None
 
@@ -189,7 +208,7 @@ def georeference(body, out_tif, bounds, srs, detect_empty=False):
     """
     if gdal is None:
         raise DownloaderError("GDAL bindings unavailable; cannot georeference tiles.")
-    mem = f"/vsimem/aoi_tile_{uuid.uuid4().hex}"     # unique per call (thread-safe)
+    mem = f"/vsimem/basemap_tile_{uuid.uuid4().hex}"     # unique per call (thread-safe)
     gdal.FileFromMemBuffer(mem, body)
     ds = None
     try:
@@ -369,13 +388,13 @@ class TileQueue:
 # ─────────────────────────────────────────────
 # FINGERPRINT
 # ─────────────────────────────────────────────
-def fingerprint(source, params, opts, aoi_wkt, aoi_crs):
+def fingerprint(source, params, opts, extent_wkt, extent_crs):
     h = hashlib.sha256()
     h.update(source.SOURCE_NAME.encode())
     for part in source.fingerprint_parts(params, opts):
         h.update(str(part).encode())
-    h.update((aoi_crs or "").encode())
-    h.update((aoi_wkt or "").encode())
+    h.update((extent_crs or "").encode())
+    h.update((extent_wkt or "").encode())
     return h.hexdigest()[:16]
 
 
@@ -415,7 +434,7 @@ def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
             warp_kwargs.update(cutlineDSName=cutline, cropToCutline=True)
         logger.info("Warp VRT → %s (%s → %s, resample=%s%s)",
                     tif, native_crs, out_crs, warp_alg,
-                    ", clip=AOI" if cutline else "")
+                    ", clip=extent" if cutline else "")
         ds = gdal.Warp(tif, vrt, options=gdal.WarpOptions(**warp_kwargs))
     else:
         logger.info("Translate VRT → %s (%s)", tif, native_crs)
@@ -431,8 +450,8 @@ def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
 # ─────────────────────────────────────────────
 # QGSTASK
 # ─────────────────────────────────────────────
-class AoiDownloadTask(QgsTask):
-    def __init__(self, source, layer, aoi_wkt, aoi_crs, params, opts,
+class BasemapTileDownloadTask(QgsTask):
+    def __init__(self, source, layer, extent_wkt, extent_crs, params, opts,
                  native_crs, out_crs, output_path=None, resample="bilinear",
                  clip=False, concurrency=CONCURRENCY,
                  max_attempts=MAX_ATTEMPTS_PER_TILE):
@@ -440,8 +459,8 @@ class AoiDownloadTask(QgsTask):
         self._source       = source
         self._params       = params
         self._opts         = opts
-        self._aoi_wkt      = aoi_wkt      # extent as a rectangle polygon (WKT)
-        self._aoi_crs      = aoi_crs      # CRS authid of the extent
+        self._extent_wkt      = extent_wkt      # extent as a rectangle polygon (WKT)
+        self._extent_crs      = extent_crs      # CRS authid of the extent
         self._native_crs   = native_crs
         self._out_crs      = out_crs or native_crs
         self._output_path  = output_path or None
@@ -478,8 +497,8 @@ class AoiDownloadTask(QgsTask):
         if gdal is None:
             raise DownloaderError("GDAL bindings unavailable; cannot run.")
 
-        aoi_geom = QgsGeometry.fromWkt(self._aoi_wkt or "")
-        if aoi_geom.isNull() or aoi_geom.isEmpty():
+        extent_geom = QgsGeometry.fromWkt(self._extent_wkt or "")
+        if extent_geom.isNull() or extent_geom.isEmpty():
             raise DownloaderError("No valid extent to download.")
 
         prepare = getattr(self._source, "prepare", None)
@@ -490,9 +509,9 @@ class AoiDownloadTask(QgsTask):
             self._native_crs = self._source.native_crs(self._params, self._opts)
 
         tiles = self._source.build_tile_grid(
-            aoi_geom, self._aoi_crs, self._params, self._opts, logger)
+            extent_geom, self._extent_crs, self._params, self._opts, logger)
         fp = fingerprint(self._source, self._params, self._opts,
-                         self._aoi_wkt, self._aoi_crs)
+                         self._extent_wkt, self._extent_crs)
         logger.info("Job fingerprint: %s", fp)
 
         db_path = os.path.join(self.work_dir, "tiles.sqlite")
@@ -511,13 +530,18 @@ class AoiDownloadTask(QgsTask):
             self._sleep(initial_delay)
 
             tiles_dir = os.path.join(self.work_dir, "tiles")
-            # In-memory work list seeded from the queue; retries are re-appended.
+            # In-memory work queue seeded from the DB; retries are re-appended.
             # All DB and throttle state is touched only here (this thread); the
             # pool workers just fetch + georeference and return a result.
-            pending = [[tid, json.loads(spec), attempts]
-                       for tid, spec, attempts in queue.pending_tiles()]
+            pending = deque([tid, json.loads(spec), attempts]
+                            for tid, spec, attempts in queue.pending_tiles())
             in_flight = {}          # future -> [tid, tile, attempts]
             processed = 0
+            # Track resolved counts in memory (seeded from any resumed run's
+            # already-'done' tiles) instead of re-querying SQLite per tile.
+            start = queue.counts()
+            done_count   = start.get("done", 0)
+            failed_count = start.get("failed", 0)
             logger.info("Fetching with concurrency=%d", self._concurrency)
 
             with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
@@ -528,7 +552,7 @@ class AoiDownloadTask(QgsTask):
                         throttle.wait(self.isCanceled)
                         if self.isCanceled():
                             break
-                        tid, tile, attempts = pending.pop(0)
+                        tid, tile, attempts = pending.popleft()
                         attempts += 1
                         queue.mark_attempt(tid, attempts)
                         out_path = os.path.join(tiles_dir, f"tile_{tid:06d}.tif")
@@ -546,6 +570,7 @@ class AoiDownloadTask(QgsTask):
                         if outcome in ("ok", "empty"):
                             throttle.on_success()
                             queue.mark_done(tid, path)
+                            done_count += 1
                             logger.info("Tile %d OK%s", tid,
                                         "" if outcome == "ok" else " (empty/missing)")
                         else:
@@ -560,13 +585,14 @@ class AoiDownloadTask(QgsTask):
                             else:
                                 logger.error("Tile %d failed permanently: %s", tid, err)
                                 queue.mark_failed(tid, err)
+                                failed_count += 1
 
                         processed += 1
-                        c = queue.counts()
-                        done_n = c["done"] + c["failed"]
+                        done_n = done_count + failed_count
                         self.setProgress(100.0 * done_n / total if total else 100.0)
                         if processed % 25 == 0:
-                            logger.info("Checkpoint %d/%d (%s)", done_n, total, c)
+                            logger.info("Checkpoint %d/%d (done=%d, failed=%d)",
+                                        done_n, total, done_count, failed_count)
 
             if self.isCanceled():
                 logger.warning("Cancelled. Queue checkpointed in %s", db_path)
@@ -581,7 +607,7 @@ class AoiDownloadTask(QgsTask):
             if not tile_paths:
                 raise DownloaderError("No tiles downloaded; cannot build mosaic.")
 
-            cutline = self._build_cutline(aoi_geom, logger) if self._clip else None
+            cutline = self._build_cutline(extent_geom, logger) if self._clip else None
             vrt_path, tif_path = build_mosaic(
                 tile_paths, self.work_dir, logger, self._output_path,
                 self._native_crs, self._out_crs, self._resample, cutline)
@@ -599,15 +625,15 @@ class AoiDownloadTask(QgsTask):
             queue.close()
             release_logger()
 
-    def _build_cutline(self, aoi_geom, logger):
+    def _build_cutline(self, extent_geom, logger):
         """Write the extent polygon (reprojected to the output CRS) to a
         GeoPackage for use as a gdal.Warp cutline. Returns the path, or None."""
         try:
             from osgeo import ogr, osr
             target = QgsCoordinateReferenceSystem(self._out_crs)
-            src    = QgsCoordinateReferenceSystem(self._aoi_crs)
+            src    = QgsCoordinateReferenceSystem(self._extent_crs)
             ctx    = QgsProject.instance().transformContext()
-            g = QgsGeometry(aoi_geom)
+            g = QgsGeometry(extent_geom)
             if src != target and g.transform(QgsCoordinateTransform(src, target, ctx)) != 0:
                 return None
             wkt = g.asWkt()
@@ -692,8 +718,8 @@ def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
         QgsMessageLog.logMessage(msg, LOG_TAB, Qgis.Critical)
         print(f"[Basemap Tile Downloader] ERROR: {msg}")
         return None
-    aoi_crs = extent_crs or QgsProject.instance().crs().authid()
-    aoi_wkt = QgsGeometry.fromRect(extent).asWkt()
+    extent_crs = extent_crs or QgsProject.instance().crs().authid()
+    extent_wkt = QgsGeometry.fromRect(extent).asWkt()
 
     try:
         params = source.extract_params(layer)
@@ -712,15 +738,16 @@ def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
     if temporary:
         from qgis.core import QgsProcessingUtils
         output_path = QgsProcessingUtils.generateTempFilename(
-            f"aoi_mosaic_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tif")
+            f"basemap_mosaic_{datetime.now().strftime('%Y%m%d_%H%M%S')}.tif")
 
     print(f"[Basemap Tile Downloader] Source : {source.SOURCE_NAME}")
     print(f"[Basemap Tile Downloader] Native : {native}   Output CRS: {out_crs}")
 
     conc     = int(concurrency) if concurrency else getattr(source, "CONCURRENCY", CONCURRENCY)
     attempts = int(max_attempts) if max_attempts else MAX_ATTEMPTS_PER_TILE
-    task = AoiDownloadTask(source, layer, aoi_wkt, aoi_crs, params, opts,
-                           native, out_crs, output_path, resample, clip, conc, attempts)
+    task = BasemapTileDownloadTask(source, layer, extent_wkt, extent_crs, params, opts,
+                                   native, out_crs, output_path, resample, clip,
+                                   conc, attempts)
 
     def _finished(success):
         release_logger()

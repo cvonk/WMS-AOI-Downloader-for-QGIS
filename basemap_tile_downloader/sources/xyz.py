@@ -60,12 +60,12 @@ def fingerprint_parts(params, opts):
 # ─────────────────────────────────────────────
 # TILE GRID
 # ─────────────────────────────────────────────
-def build_tile_grid(aoi_geom, aoi_crs, params, opts, logger):
+def build_tile_grid(extent_geom, extent_crs, params, opts, logger):
     zoom = int(opts.get("zoom", 18))
     web  = QgsCoordinateReferenceSystem(WEBMERC)
     ctx  = QgsProject.instance().transformContext()
-    src  = QgsCoordinateReferenceSystem(aoi_crs)
-    region = QgsGeometry(aoi_geom)
+    src  = QgsCoordinateReferenceSystem(extent_crs)
+    region = QgsGeometry(extent_geom)
     if src != web and region.transform(QgsCoordinateTransform(src, web, ctx)) != 0:
         raise DownloaderError("Could not reproject the extent to EPSG:3857.")
 

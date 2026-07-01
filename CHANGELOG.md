@@ -5,6 +5,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-01
+### Changed
+- Raised `qgisMinimumVersion` to 3.40.8 (the version the plugin is developed and
+  tested against).
+- Moved the "Crop output to the exact extent" checkbox up directly under the
+  "Extent to render" selector, so it sits with the extent it applies to.
+- Renamed the per-job working folder from `<project>/aoi_download/` to
+  `<project>/basemap_tile_downloader/`, and the internal task/dialog/plugin
+  classes from `Aoi*` to `BasemapTile*`, to match the plugin name. An
+  interrupted run left in the old `aoi_download/` folder won't auto-resume;
+  delete that folder or start the export again.
+### Fixed
+- Network requests now honour a 60 s transfer timeout, and a genuine timeout is
+  detected reliably (`QgsBlockingNetworkRequest.TimeoutError`) and retried
+  instead of being mistaken for an empty XYZ/WMTS tile (a permanent gap).
+- `Retry-After` HTTP-date parsing no longer assumes GMT and drops the deprecated
+  `datetime.utcnow()`.
+- The XYZ zoom spinner is clamped to the layer's advertised `zmin`/`zmax`.
+- WMTS downloads now show the large-download / Terms-of-Service confirmation
+  (its tile count can't be estimated in advance, so it prompts each run).
+
 ## [1.2.1] - 2026-07-01
 ### Changed
 - Renamed the plugin package folder `aoi_downloader` → `basemap_tile_downloader`

@@ -4,7 +4,7 @@ WMTS source backend for the Basemap Tile Downloader.
 
 Parses the WMTS GetCapabilities for the layer's TileMatrixSet (per-zoom
 scale / origin / tile size / matrix extent), works out which tiles cover the
-AOI at a chosen matrix, and fetches them via RESTful ResourceURL templates or
+extent at a chosen matrix, and fetches them via RESTful ResourceURL templates or
 KVP GetTile requests.
 """
 
@@ -171,7 +171,7 @@ def prepare(params, opts, logger):
 # ─────────────────────────────────────────────
 # TILE GRID
 # ─────────────────────────────────────────────
-def build_tile_grid(aoi_geom, aoi_crs, params, opts, logger):
+def build_tile_grid(extent_geom, extent_crs, params, opts, logger):
     matrices = params.get("matrices")
     if not matrices:
         raise DownloaderError("WMTS capabilities not prepared.")
@@ -180,8 +180,8 @@ def build_tile_grid(aoi_geom, aoi_crs, params, opts, logger):
 
     tms    = QgsCoordinateReferenceSystem(params["tms_crs"])
     ctx    = QgsProject.instance().transformContext()
-    src    = QgsCoordinateReferenceSystem(aoi_crs)
-    region = QgsGeometry(aoi_geom)
+    src    = QgsCoordinateReferenceSystem(extent_crs)
+    region = QgsGeometry(extent_geom)
     if src != tms and region.transform(QgsCoordinateTransform(src, tms, ctx)) != 0:
         raise DownloaderError("Could not reproject the extent to the tile-matrix-set CRS.")
 
