@@ -8,14 +8,15 @@ resolution for WMS, zoom level for XYZ.
 """
 
 from qgis.PyQt.QtWidgets import (
-    QDialog, QFormLayout, QVBoxLayout, QDialogButtonBox,
-    QSpinBox, QDoubleSpinBox, QComboBox, QLabel,
+    QDialog, QFormLayout, QVBoxLayout, QHBoxLayout, QDialogButtonBox,
+    QSpinBox, QDoubleSpinBox, QLabel, QWidget, QLineEdit, QToolButton,
+    QMenu, QFileDialog,
 )
 from qgis.core import (
     QgsProject, QgsMapLayerProxyModel, QgsRasterLayer, QgsSettings,
     QgsCoordinateReferenceSystem,
 )
-from qgis.gui import QgsMapLayerComboBox, QgsFileWidget, QgsProjectionSelectionWidget
+from qgis.gui import QgsMapLayerComboBox, QgsProjectionSelectionWidget
 
 from . import engine
 from .sources import xyz
@@ -25,6 +26,54 @@ SETTINGS_GROUP = "aoi_downloader"
 DEFAULT_TILE_PIXELS = 1024
 DEFAULT_RESOLUTION  = 0.5
 DEFAULT_ZOOM        = 18
+
+
+class OutputDestinationWidget(QWidget):
+    """A single output control like QGIS's own dialogs: a path line-edit plus a
+    "…" dropdown offering 'Save to File…' / 'Save to Temporary File'. An empty
+    field means a temporary file (shown as the placeholder)."""
+
+    def __init__(self, parent=None, file_filter="GeoTIFF (*.tif *.tiff)"):
+        super().__init__(parent)
+        self._filter = file_filter
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText("[Save to temporary file]")
+        self.edit.setClearButtonEnabled(True)
+
+        self.btn = QToolButton()
+        self.btn.setText("…")
+        self.btn.setPopupMode(QToolButton.InstantPopup)
+        menu = QMenu(self.btn)
+        menu.addAction("Save to File…").triggered.connect(self._choose_file)
+        menu.addAction("Save to Temporary File").triggered.connect(self._set_temporary)
+        self.btn.setMenu(menu)
+
+        lay.addWidget(self.edit)
+        lay.addWidget(self.btn)
+
+    def _choose_file(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Output GeoTIFF", self.edit.text().strip(), self._filter)
+        if path:
+            self.edit.setText(path)
+
+    def _set_temporary(self):
+        self.edit.clear()
+
+    # public API -------------------------------------------------------------
+    def is_temporary(self):
+        return not self.edit.text().strip()
+
+    def file_path(self):
+        return None if self.is_temporary() else self.edit.text().strip()
+
+    def set_file_path(self, path):
+        self.edit.setText(path or "")
 
 
 class AoiDialog(QDialog):
@@ -74,16 +123,8 @@ class AoiDialog(QDialog):
         self.crs_widget = QgsProjectionSelectionWidget()
         form.addRow("Output CRS:", self.crs_widget)
 
-        self.out_mode = QComboBox()
-        self.out_mode.addItem("Save to file…", "file")
-        self.out_mode.addItem("Temporary file", "temp")
-        self.out_mode.currentIndexChanged.connect(self._sync_out_widgets)
-        form.addRow("Output:", self.out_mode)
-
-        self.out_file = QgsFileWidget()
-        self.out_file.setStorageMode(QgsFileWidget.SaveFile)
-        self.out_file.setFilter("GeoTIFF (*.tif *.tiff)")
-        form.addRow("Output file:", self.out_file)
+        self.out_widget = OutputDestinationWidget()
+        form.addRow("Output:", self.out_widget)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -100,7 +141,6 @@ class AoiDialog(QDialog):
         layout.addWidget(buttons)
 
         self._restore_state()
-        self._sync_out_widgets()
         self._on_layer_changed()
 
     # ── filtering / visibility ────────────────────────────────────────────────
@@ -142,9 +182,6 @@ class AoiDialog(QDialog):
         self.zoom_res_info.setText(
             f"≈ {xyz.tile_resolution_m(self.zoom_spin.value()):.3f} m/px at the equator")
 
-    def _sync_out_widgets(self, *args):
-        self.out_file.setEnabled(self.out_mode.currentData() == "file")
-
     # ── settings persistence ──────────────────────────────────────────────────
     def _restore_state(self):
         s, g = QgsSettings(), SETTINGS_GROUP
@@ -152,10 +189,11 @@ class AoiDialog(QDialog):
         self.res_spin.setValue(float(s.value(f"{g}/wms_resolution", DEFAULT_RESOLUTION)))
         self.zoom_spin.setValue(int(s.value(f"{g}/xyz_zoom", DEFAULT_ZOOM)))
 
-        idx = self.out_mode.findData(s.value(f"{g}/output_mode", "file"))
-        if idx >= 0:
-            self.out_mode.setCurrentIndex(idx)
-        self.out_file.setFilePath(s.value(f"{g}/output_path", "") or "")
+        # Empty path (or remembered temp mode) → temporary file.
+        if s.value(f"{g}/output_mode", "file") == "temp":
+            self.out_widget.set_file_path("")
+        else:
+            self.out_widget.set_file_path(s.value(f"{g}/output_path", "") or "")
 
         # Set the layers first (this fires _on_layer_changed, which may default
         # the output CRS to the source's native CRS)…
@@ -184,8 +222,8 @@ class AoiDialog(QDialog):
         s.setValue(f"{g}/xyz_zoom", self.zoom_spin.value())
         if self.crs_widget.crs().isValid():
             s.setValue(f"{g}/out_crs", self.crs_widget.crs().authid())
-        s.setValue(f"{g}/output_mode", self.out_mode.currentData())
-        s.setValue(f"{g}/output_path", self.out_file.filePath())
+        s.setValue(f"{g}/output_mode", "temp" if self.out_widget.is_temporary() else "file")
+        s.setValue(f"{g}/output_path", self.out_widget.file_path() or "")
         ly, al = self.layer_combo.currentLayer(), self.aoi_combo.currentLayer()
         s.setValue(f"{g}/layer_id", ly.id() if ly else "")
         s.setValue(f"{g}/aoi_layer_id", al.id() if al else "")
@@ -208,6 +246,6 @@ class AoiDialog(QDialog):
             opts = {}
         crs = self.crs_widget.crs()
         out_crs = crs.authid() if crs.isValid() else None
-        temporary = self.out_mode.currentData() == "temp"
-        out_path = None if temporary else (self.out_file.filePath() or None)
+        temporary = self.out_widget.is_temporary()
+        out_path = self.out_widget.file_path()
         return (layer, aoi, opts, out_crs, out_path, temporary)
