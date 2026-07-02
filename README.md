@@ -139,9 +139,14 @@ Notes:
   reprojection, no resampling).
 - **Crop output to the exact extent** trims the tile-aligned mosaic to the
   precise extent rectangle.
-- **Parallel downloads** and **Maximum attempts per tile** are in the collapsible
-  **Advanced** section. Lower the parallel downloads (1–2) for strict servers
-  that reject many simultaneous connections; WMS defaults to 2, XYZ/WMTS to 4.
+- **Parallel downloads**, **Maximum attempts per tile** and **Minimum delay
+  between requests** are in the collapsible **Advanced** section. Lower the
+  parallel downloads (1–2) for strict servers that reject many simultaneous
+  connections; WMS defaults to 2, XYZ/WMTS to 4. The **minimum delay** (default
+  0 s) is a floor on the pace — raise it (e.g. 2 s) to pin a known-good rate for
+  a strict server; at 0 the adaptive throttle sets the pace on its own.
+- If you **cancel** a run, the mosaic is still built from whatever downloaded so
+  far (with gaps where tiles are missing), and re-running fills in the rest.
 
 Click **OK** to start. Progress is shown in the Task Manager, and the finished
 mosaic is added to the project automatically.
@@ -210,6 +215,7 @@ engine.run(layer=wms, extent=extent, extent_crs=extent_crs,
            resample="bilinear",            # near | bilinear | cubic | none
            clip=True,                      # crop to the exact extent
            concurrency=2,                  # parallel tile fetches
+           min_delay=0,                    # floor (s) on the pace; 0 = adaptive
            output_path=r"C:\Users\you\output.tif")  # or temporary=True for a temp file
 ```
 

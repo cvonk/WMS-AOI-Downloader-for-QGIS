@@ -3,7 +3,7 @@ name=Basemap Tile Downloader
 qgisMinimumVersion=3.40.8
 description=Download a WMS, WMTS, or XYZ basemap over an extent and mosaic it into a GeoTIFF.
 about=Auto-detects whether the chosen layer is a WMS, WMTS, or XYZ tile source. Tiles the request over a chosen extent (WMS GetMap at a chosen resolution/CRS, or WMTS / Web-Mercator {z}/{x}/{y} at a chosen zoom), downloads with adaptive throttling and a resumable SQLite work queue, georeferences each tile, and builds a compressed, tiled GeoTIFF mosaic (with overviews) using GDAL. Optionally reprojects to a chosen output CRS and crops to the exact extent. Requires the GDAL Python bindings.
-version=1.4.2
+version=1.4.3
 author=Coert Vonk
 email=coert.vonk@gmail.com
 tracker=https://github.com/cvonk/Basemap-Tile-Downloader/issues
@@ -14,7 +14,11 @@ experimental=False
 deprecated=False
 category=Web
 tags=wms,wmts,xyz,tiles,download,raster,mosaic,gdal,basemap,orthophoto,aoi,web mercator
-changelog=1.4.2 - WMS ServiceExceptions (transient server draw failures) are now
+changelog=1.4.3 - New "Minimum delay between requests" advanced option (default
+    0). The mosaic is now always built from whatever downloaded, including after a
+    cancel, so gaps show which tiles are missing. Persistently-broken tiles give
+    up faster (back-pressure budget 8, backoff cap 30s).
+    1.4.2 - WMS ServiceExceptions (transient server draw failures) are now
     retried with back-off on the back-pressure budget instead of failing fast, so
     intermittent provider glitches recover far more often. Repeated error messages
     in the log are collapsed (full once, then "repeat xN", with an end-of-run

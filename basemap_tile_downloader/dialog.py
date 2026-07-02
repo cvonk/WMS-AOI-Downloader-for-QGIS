@@ -36,6 +36,7 @@ DEFAULT_RESOLUTION  = 0.5
 DEFAULT_ZOOM         = 18
 DEFAULT_CONCURRENCY  = 4
 DEFAULT_MAX_ATTEMPTS = 6
+DEFAULT_MIN_DELAY    = 0.0
 
 # Ask for confirmation above this estimated tile count.
 WARN_TILE_COUNT = 5000
@@ -220,12 +221,22 @@ class BasemapTileDialog(QDialog):
         self.attempts_spin.setRange(1, 20)
         self.attempts_spin.setToolTip(
             "How many times a tile is retried before it is marked failed.")
+        self.min_delay_spin = QDoubleSpinBox()
+        self.min_delay_spin.setRange(0.0, 60.0)
+        self.min_delay_spin.setDecimals(1)
+        self.min_delay_spin.setSingleStep(0.5)
+        self.min_delay_spin.setSuffix(" s")
+        self.min_delay_spin.setToolTip(
+            "Floor on the pace: never send requests closer together than this. "
+            "0 = no floor (the adaptive throttle decides). Raise it (e.g. 2 s) to "
+            "pin a known-good rate for a strict server.")
 
         advanced = QgsCollapsibleGroupBox("Advanced")
         advanced.setCollapsed(True)
         aform = QFormLayout(advanced)
         aform.addRow("Parallel downloads:", self.conc_spin)
         aform.addRow("Maximum attempts per tile:", self.attempts_spin)
+        aform.addRow("Minimum delay between requests:", self.min_delay_spin)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -415,6 +426,7 @@ class BasemapTileDialog(QDialog):
             self.crs_widget.setCrs(QgsCoordinateReferenceSystem(out_crs))
         self.conc_spin.setValue(int(s.value(f"{g}/concurrency", DEFAULT_CONCURRENCY)))
         self.attempts_spin.setValue(int(s.value(f"{g}/max_attempts", DEFAULT_MAX_ATTEMPTS)))
+        self.min_delay_spin.setValue(float(s.value(f"{g}/min_delay", DEFAULT_MIN_DELAY)))
 
         # Restore the last-used extent (overriding the default canvas extent that
         # setMapCanvas seeded). setOutputExtentFromUser fills the N/S/E/W fields.
@@ -445,6 +457,7 @@ class BasemapTileDialog(QDialog):
         s.setValue(f"{g}/clip", self.clip_check.isChecked())
         s.setValue(f"{g}/concurrency", self.conc_spin.value())
         s.setValue(f"{g}/max_attempts", self.attempts_spin.value())
+        s.setValue(f"{g}/min_delay", self.min_delay_spin.value())
         ly = self.layer_combo.currentLayer()
         s.setValue(f"{g}/layer_id", ly.id() if ly else "")
 
@@ -501,8 +514,9 @@ class BasemapTileDialog(QDialog):
         clip = self.clip_check.isChecked()
         concurrency = self.conc_spin.value()
         max_attempts = self.attempts_spin.value()
+        min_delay = self.min_delay_spin.value()
         valid = self.extent_widget.isValid()
         extent = self.extent_widget.outputExtent() if valid else None
         extent_crs = self.extent_widget.outputCrs().authid() if valid else None
         return (layer, extent, extent_crs, opts, out_crs, out_path, temporary,
-                resample, clip, concurrency, max_attempts)
+                resample, clip, concurrency, max_attempts, min_delay)

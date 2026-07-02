@@ -5,6 +5,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.3] - 2026-07-02
+### Added
+- **Minimum delay between requests** (Advanced, default 0 s): a floor on the
+  pace so requests are never sent closer together than this. Useful to pin a
+  known-good rate for a strict server; 0 lets the adaptive throttle decide.
+### Changed
+- The mosaic is now **always built from whatever downloaded**, including after a
+  **cancel** — so the gaps show exactly which tiles are missing (a cancelled run
+  loads a partial mosaic and can be re-run to fill in the rest).
+- Shorter tail on persistently-broken tiles: the back-pressure budget is 8 (was
+  20) and the adaptive-backoff cap is 30 s (was 60 s), so a truly-unavailable
+  region gives up in minutes rather than hours. Server-error back-off is now
+  logged as "server error", not "429".
+
 ## [1.4.2] - 2026-07-02
 ### Changed
 - WMS `ServiceException`s (the server transiently failing to draw a tile, e.g.

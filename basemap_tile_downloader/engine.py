@@ -47,10 +47,11 @@ MAX_ATTEMPTS_PER_TILE    = 6
 # Throttle/timeout responses are back-pressure, not the tile's fault, so they
 # get their own (larger) retry budget instead of burning the error budget above.
 # Still bounded, so a server that returns 429/403 forever can't loop indefinitely.
-MAX_BACKPRESSURE_RETRIES = 20
+MAX_BACKPRESSURE_RETRIES = 8       # bounded so a persistently-broken tile gives up
+                                   # in minutes, not hours
 INITIAL_DELAY_SEC        = 0.5
 MIN_DELAY_SEC            = 0.05
-MAX_DELAY_SEC            = 60.0    # ceiling for our *adaptive* (guessed) backoff
+MAX_DELAY_SEC            = 30.0    # ceiling for our *adaptive* (guessed) backoff
 RETRY_AFTER_MAX_SEC      = 300.0   # ceiling for a *server-directed* Retry-After wait
                                    # (honoured beyond the adaptive cap, but bounded so
                                    # an absurd value can't stall the run indefinitely)
@@ -259,18 +260,21 @@ def georeference(body, out_tif, bounds, srs, detect_empty=False):
 # ADAPTIVE THROTTLE
 # ─────────────────────────────────────────────
 class AdaptiveThrottle:
-    def __init__(self, logger, initial_delay=INITIAL_DELAY_SEC):
-        self._d, self._ok, self._log = initial_delay, 0, logger
+    def __init__(self, logger, initial_delay=INITIAL_DELAY_SEC, min_delay=0.0):
+        self._d, self._ok, self._log = max(initial_delay, min_delay), 0, logger
         self._extra = 0.0     # one-shot wait honouring a server-directed Retry-After
+        self._min = max(0.0, float(min_delay))   # user floor on the pace (default 0)
 
     def status(self):
         """Human-readable current pacing, for the log."""
+        base = max(self._min, self._d)
         if self._extra:
-            return f"{self._d:.2f}s + {self._extra:.1f}s one-shot"
-        return f"{self._d:.2f}s"
+            return f"{base:.2f}s + {self._extra:.1f}s one-shot"
+        return f"{base:.2f}s"
 
     def wait(self, cancel_check=None):
-        rem = self._d + self._extra     # consume any one-shot Retry-After wait
+        # Never pace faster than the user's minimum delay (default 0 = no floor).
+        rem = max(self._min, self._d) + self._extra   # + any one-shot Retry-After
         self._extra = 0.0
         while rem > 0:
             if cancel_check and cancel_check():
@@ -290,7 +294,7 @@ class AdaptiveThrottle:
         self._log.warning("Throttle ↓ %.3f→%.3f (%s)", self._d, new, reason)
         self._d = new
 
-    def on_throttle(self, retry_after=None):
+    def on_throttle(self, retry_after=None, reason="rate-limit"):
         # Adaptive (guessed) backoff is capped at MAX_DELAY_SEC.
         new = min(MAX_DELAY_SEC, self._d * SLOWDOWN_FACTOR)
         if retry_after and retry_after > 0:
@@ -304,7 +308,7 @@ class AdaptiveThrottle:
                               self._d, new, self._extra)
             self._d = new
         else:
-            self._slow(new, "throttle (429)")
+            self._slow(new, reason)
 
     def on_timeout(self):
         self._slow(min(MAX_DELAY_SEC, self._d * SLOWDOWN_FACTOR), "timeout")
@@ -512,7 +516,7 @@ class BasemapTileDownloadTask(QgsTask):
     def __init__(self, source, layer, extent_wkt, extent_crs, params, opts,
                  native_crs, out_crs, output_path=None, resample="bilinear",
                  clip=False, concurrency=CONCURRENCY,
-                 max_attempts=MAX_ATTEMPTS_PER_TILE):
+                 max_attempts=MAX_ATTEMPTS_PER_TILE, min_delay=0.0):
         # Silent: suppress QGIS's own task-finished/terminated notifications — the
         # plugin posts its own completion (and error) messages, so QGIS's generic
         # one is just noise, especially after a failure. (Silent needs QGIS 3.26+;
@@ -535,6 +539,7 @@ class BasemapTileDownloadTask(QgsTask):
         self._concurrency  = max(1, int(concurrency))
         self._max_attempts = max(1, int(max_attempts))
         self._max_backpressure = MAX_BACKPRESSURE_RETRIES
+        self._min_delay    = max(0.0, float(min_delay or 0.0))
 
         project = QgsProject.instance()
         base_dir = (os.path.dirname(project.fileName())
@@ -545,6 +550,7 @@ class BasemapTileDownloadTask(QgsTask):
         self.result_tif_path = None
         self.exception       = None
         self.summary         = None      # {total, done, failed} once tiles resolve
+        self.was_cancelled   = False     # set if the run was cancelled mid-way
         self.logger          = build_logger(self.work_dir)
 
     def run(self):
@@ -593,7 +599,9 @@ class BasemapTileDownloadTask(QgsTask):
             logger.info("Queue: %s  (total=%d)", queue.counts(), total)
 
             initial_delay = getattr(self._source, "INITIAL_DELAY_SEC", INITIAL_DELAY_SEC)
-            throttle = AdaptiveThrottle(logger, initial_delay)
+            throttle = AdaptiveThrottle(logger, initial_delay, self._min_delay)
+            if self._min_delay:
+                logger.info("Minimum delay between requests: %.2fs", self._min_delay)
             self._sleep(initial_delay)
 
             tiles_dir = os.path.join(self.work_dir, "tiles")
@@ -655,8 +663,10 @@ class BasemapTileDownloadTask(QgsTask):
                             # and speeds up again as tiles succeed.
                             if outcome == "timeout":
                                 throttle.on_timeout()
-                            else:                       # throttle or server_error
-                                throttle.on_throttle(retry_after)
+                            elif outcome == "throttle":
+                                throttle.on_throttle(retry_after, reason="rate-limit")
+                            else:                       # server_error
+                                throttle.on_throttle(reason="server error")
                             backpressure += 1
                             ra = f", server asked {retry_after:.0f}s" if retry_after else ""
                             seen = err_seen.get(err, 0) + 1
@@ -706,16 +716,22 @@ class BasemapTileDownloadTask(QgsTask):
                             logger.info("Checkpoint %d/%d (done=%d, failed=%d)",
                                         done_n, total, done_count, failed_count)
 
-            if self.isCanceled():
-                logger.warning("Cancelled. Queue checkpointed in %s", db_path)
-                return
+            # Always mosaic what we have — even on cancel — so the gaps show which
+            # tiles are missing. Only bail if there is literally nothing to build.
+            cancelled = self.isCanceled()
+            self.was_cancelled = cancelled
 
             final_counts = queue.counts()
-            self.summary = {"total": total,
-                            "done":   final_counts.get("done", 0),
-                            "failed": final_counts.get("failed", 0)}
-            n_done, n_failed = final_counts.get("done", 0), final_counts.get("failed", 0)
-            if n_failed:
+            n_done   = final_counts.get("done", 0)
+            n_failed = final_counts.get("failed", 0)
+            self.summary = {"total": total, "done": n_done, "failed": n_failed,
+                            "cancelled": cancelled}
+            if cancelled:
+                logger.warning(
+                    "Cancelled at %d/%d tiles — building a partial mosaic from what "
+                    "downloaded so far (queue checkpointed in %s; re-run to continue).",
+                    n_done, total, db_path)
+            elif n_failed:
                 logger.warning(
                     "Queue drained: %d of %d tiles downloaded, %d failed after "
                     "exhausting their retries. The mosaic will have gaps there; "
@@ -727,8 +743,12 @@ class BasemapTileDownloadTask(QgsTask):
             # provider outage is one readable summary, not thousands of lines.
             for msg, n in sorted(err_seen.items(), key=lambda kv: -kv[1]):
                 logger.info("Error seen %d×: %s", n, _first_line(msg))
+
             tile_paths = queue.done_file_paths()
             if not tile_paths:
+                if cancelled:
+                    logger.warning("Cancelled before any tile downloaded; nothing to mosaic.")
+                    return
                 raise DownloaderError("No tiles downloaded; cannot build mosaic.")
 
             cutline = self._build_cutline(extent_geom, logger) if self._clip else None
@@ -821,7 +841,7 @@ class BasemapTileDownloadTask(QgsTask):
 # ─────────────────────────────────────────────
 def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
         output_path=None, temporary=False, resample="bilinear", clip=False,
-        concurrency=None, max_attempts=None, on_finished=None):
+        concurrency=None, max_attempts=None, min_delay=None, on_finished=None):
     """
     Start a download task. The source backend (WMS / XYZ) is auto-detected from
     `layer`. `opts` is the source-specific settings dict
@@ -878,26 +898,29 @@ def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
 
     conc     = int(concurrency) if concurrency else getattr(source, "CONCURRENCY", CONCURRENCY)
     attempts = int(max_attempts) if max_attempts else MAX_ATTEMPTS_PER_TILE
+    mind     = float(min_delay) if min_delay else 0.0
     task = BasemapTileDownloadTask(source, layer, extent_wkt, extent_crs, params, opts,
                                    native, out_crs, output_path, resample, clip,
-                                   conc, attempts)
+                                   conc, attempts, mind)
 
     def _finished(success):
         release_logger()
         loaded = False
-        if success and task.result_tif_path and os.path.exists(task.result_tif_path):
-            layer_name = os.path.splitext(
-                os.path.basename(task.result_tif_path))[0].replace("_", " ")
-            lyr = QgsRasterLayer(task.result_tif_path, layer_name)
+        tif = task.result_tif_path
+        # Load the mosaic whenever one was produced — including a partial mosaic
+        # from a cancelled run (taskTerminated), so the user can see the gaps.
+        if tif and os.path.exists(tif):
+            layer_name = os.path.splitext(os.path.basename(tif))[0].replace("_", " ")
+            lyr = QgsRasterLayer(tif, layer_name)
             if lyr.isValid():
                 QgsProject.instance().addMapLayer(lyr)
                 loaded = True
-                print(f"[Basemap Tile Downloader] Mosaic loaded: {task.result_tif_path}")
+                print(f"[Basemap Tile Downloader] Mosaic loaded: {tif}")
             else:
-                msg = f"Mosaic file invalid: {task.result_tif_path}"
+                msg = f"Mosaic file invalid: {tif}"
                 print(f"[Basemap Tile Downloader] WARNING: {msg}")
                 QgsMessageLog.logMessage(msg, LOG_TAB, Qgis.Critical)
-        elif not success:
+        elif not success and not task.was_cancelled:
             msg = str(task.exception) if task.exception else "Task failed."
             print(f"[Basemap Tile Downloader] FAILED: {msg}")
             QgsMessageLog.logMessage(f"Task failed: {msg}", LOG_TAB, Qgis.Critical)
@@ -905,12 +928,13 @@ def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
         if callable(on_finished):
             try:
                 on_finished({
-                    "success": bool(success),
-                    "loaded":  loaded,
-                    "tif":     task.result_tif_path,
-                    "summary": task.summary or {},
-                    "error":   (str(task.exception)
-                                if (not success and task.exception) else None),
+                    "success":   bool(success),
+                    "loaded":    loaded,
+                    "cancelled": bool(task.was_cancelled),
+                    "tif":       tif,
+                    "summary":   task.summary or {},
+                    "error":     (str(task.exception)
+                                  if (not success and task.exception) else None),
                 })
             except Exception:
                 pass
