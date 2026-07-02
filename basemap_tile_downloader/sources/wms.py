@@ -274,7 +274,11 @@ def fetch_one_tile(params, opts, tile, out_path, logger):
     if status and status >= 400:
         raise TileFetchError(f"HTTP {status}.")
     if _is_xml_exception(body):
-        raise TileFetchError(f"WMS ServiceException: {_parse_exception(body)}")
+        # A ServiceException is usually the provider's server failing to draw
+        # (e.g. it momentarily can't read its own data file) — often transient.
+        # Flag it so the engine backs off and retries rather than failing fast.
+        raise TileFetchError(f"WMS ServiceException: {_parse_exception(body)}",
+                             is_server_error=True)
     if not body:
         raise TileFetchError("Empty response body.")
 

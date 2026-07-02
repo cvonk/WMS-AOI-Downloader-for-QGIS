@@ -68,6 +68,12 @@ LOG_TAB          = "Basemap Tile Downloader"
 TASK_DESC        = "Basemap tile download"
 
 
+def _first_line(s, limit=200):
+    """First line of a (possibly multi-line) error message, truncated — used to
+    keep the log readable when an error repeats across many tiles."""
+    return next(iter((s or "").splitlines()), "")[:limit]
+
+
 # ─────────────────────────────────────────────
 # EXCEPTIONS
 # ─────────────────────────────────────────────
@@ -75,9 +81,14 @@ class DownloaderError(Exception):
     """Fatal, non-retryable."""
 
 class TileFetchError(Exception):
-    def __init__(self, message, retry_after=None, is_throttle=False):
+    def __init__(self, message, retry_after=None, is_throttle=False,
+                 is_server_error=False):
         super().__init__(message)
         self.retry_after = retry_after
+        # is_server_error: a transient server-side failure (e.g. a WMS
+        # ServiceException about a file it momentarily can't read). Retried on
+        # the back-pressure budget with backoff, not the per-tile error budget.
+        self.is_server_error = is_server_error
         self.is_throttle = is_throttle
 
 
@@ -601,6 +612,10 @@ class BasemapTileDownloadTask(QgsTask):
             start = queue.counts()
             done_count   = start.get("done", 0)
             failed_count = start.get("failed", 0)
+            # Collapse repeated error messages: log a given error in full the
+            # first time, then just a one-line "(repeat ×N)" — a broken provider
+            # can otherwise spam thousands of identical multi-line exceptions.
+            err_seen = {}
             logger.info("Fetching with concurrency=%d", self._concurrency)
 
             with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
@@ -630,37 +645,57 @@ class BasemapTileDownloadTask(QgsTask):
                             done_count += 1
                             logger.info("Tile %d OK%s", tid,
                                         "" if outcome == "ok" else " (empty/missing)")
-                        elif outcome in ("throttle", "timeout"):
+                        elif outcome in ("throttle", "timeout", "server_error"):
                             # Back-pressure: slow the whole run down and retry the
-                            # tile without spending its error budget (the tile
-                            # itself is fine — the server is rate-limiting us).
+                            # tile without spending its error budget — the tile is
+                            # fine, the server is rate-limiting us (throttle/
+                            # timeout) or transiently failing to serve it
+                            # (server_error, e.g. a WMS ServiceException). The
+                            # global throttle self-regulates: it backs off on these
+                            # and speeds up again as tiles succeed.
                             if outcome == "timeout":
                                 throttle.on_timeout()
-                            else:
+                            else:                       # throttle or server_error
                                 throttle.on_throttle(retry_after)
                             backpressure += 1
                             ra = f", server asked {retry_after:.0f}s" if retry_after else ""
+                            seen = err_seen.get(err, 0) + 1
+                            err_seen[err] = seen
                             if backpressure <= self._max_backpressure:
                                 pending.append([tid, tile, attempts, backpressure])
-                                logger.info(
-                                    "Tile %d back-pressure (%s: %s%s) — backing off, "
-                                    "now pacing at %s; requeued (retry %d/%d).",
-                                    tid, outcome, err or "-", ra, throttle.status(),
-                                    backpressure, self._max_backpressure)
+                                if seen == 1:
+                                    logger.info(
+                                        "Tile %d back-pressure (%s: %s%s) — backing "
+                                        "off, now pacing at %s; requeued (retry %d/%d).",
+                                        tid, outcome, err or "-", ra, throttle.status(),
+                                        backpressure, self._max_backpressure)
+                                else:
+                                    logger.info(
+                                        "Tile %d back-pressure (%s, repeat ×%d) — "
+                                        "pacing at %s; requeued (retry %d/%d).",
+                                        tid, outcome, seen, throttle.status(),
+                                        backpressure, self._max_backpressure)
                             else:
                                 logger.error(
-                                    "Tile %d gave up after %d throttle/timeout "
-                                    "retries: %s", tid, backpressure, err)
+                                    "Tile %d gave up after %d %s retries: %s",
+                                    tid, backpressure, outcome, _first_line(err))
                                 queue.mark_failed(tid, err)
                                 failed_count += 1
                         else:
                             attempts += 1
                             queue.mark_attempt(tid, attempts)
-                            logger.warning("Tile %d attempt %d: %s", tid, attempts, err)
+                            seen = err_seen.get(err, 0) + 1
+                            err_seen[err] = seen
+                            if seen == 1:
+                                logger.warning("Tile %d attempt %d: %s", tid, attempts, err)
+                            else:
+                                logger.warning("Tile %d attempt %d: %s (repeat ×%d)",
+                                               tid, attempts, _first_line(err), seen)
                             if attempts < self._max_attempts:
                                 pending.append([tid, tile, attempts, backpressure])
                             else:
-                                logger.error("Tile %d failed permanently: %s", tid, err)
+                                logger.error("Tile %d failed permanently: %s",
+                                             tid, _first_line(err))
                                 queue.mark_failed(tid, err)
                                 failed_count += 1
 
@@ -688,6 +723,10 @@ class BasemapTileDownloadTask(QgsTask):
                     n_done, total, n_failed)
             else:
                 logger.info("Queue drained: all %d tiles downloaded.", total)
+            # Tally of distinct errors seen this run (most frequent first) so a
+            # provider outage is one readable summary, not thousands of lines.
+            for msg, n in sorted(err_seen.items(), key=lambda kv: -kv[1]):
+                logger.info("Error seen %d×: %s", n, _first_line(msg))
             tile_paths = queue.done_file_paths()
             if not tile_paths:
                 raise DownloaderError("No tiles downloaded; cannot build mosaic.")
@@ -752,7 +791,7 @@ class BasemapTileDownloadTask(QgsTask):
     def _fetch_worker(self, tile, out_path):
         """Runs in a pool thread: one fetch attempt, no DB/throttle access.
         Returns (outcome, path, retry_after, error) where outcome is one of
-        'ok' | 'empty' | 'throttle' | 'timeout' | 'error'."""
+        'ok' | 'empty' | 'throttle' | 'timeout' | 'server_error' | 'error'."""
         try:
             path = self._source.fetch_one_tile(
                 self._params, self._opts, tile, out_path, self.logger)
@@ -763,6 +802,8 @@ class BasemapTileDownloadTask(QgsTask):
                 return ("timeout", None, None, msg)
             if e.is_throttle:
                 return ("throttle", None, e.retry_after, msg)
+            if e.is_server_error:
+                return ("server_error", None, None, msg)
             return ("error", None, None, msg)
         except Exception as e:                      # unexpected → treat as error
             return ("error", None, None, str(e))

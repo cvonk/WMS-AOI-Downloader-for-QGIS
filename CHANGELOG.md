@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-07-02
+### Changed
+- WMS `ServiceException`s (the server transiently failing to draw a tile, e.g.
+  "unable to access file") are now treated as back-pressure: the run backs off
+  and retries the tile on the larger back-pressure budget instead of burning its
+  6-attempt error budget with instant retries. Transient provider glitches that
+  succeed on a later request now recover far more often.
+- Repeated error messages in the log are collapsed: an error is logged in full
+  the first time, then as a one-line "(repeat ×N)", with a per-error tally at the
+  end of the run — so a provider outage no longer spams thousands of identical
+  multi-line exceptions.
+
 ## [1.4.1] - 2026-07-01
 ### Added
 - The dialog title bar now shows the plugin version (from metadata.txt, e.g.
