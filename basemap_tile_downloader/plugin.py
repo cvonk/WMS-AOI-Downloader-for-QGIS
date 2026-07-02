@@ -52,7 +52,7 @@ class BasemapTileDownloaderPlugin:
          resample, clip, concurrency, max_attempts) = dlg.values()
         if layer is None or engine.source_for(layer) is None:
             self.iface.messageBar().pushWarning(
-                MENU_TITLE, "Select a recognised WMS / WMTS / XYZ source layer.")
+                MENU_TITLE, "Select a recognised WMS / WMTS / XYZ or local raster (GeoTIFF) layer.")
             return
         if extent is None or extent.isEmpty():
             self.iface.messageBar().pushWarning(

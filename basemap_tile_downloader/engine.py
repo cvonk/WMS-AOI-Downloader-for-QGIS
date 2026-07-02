@@ -85,8 +85,8 @@ class TileFetchError(Exception):
 # SOURCE DISPATCH  (late import to avoid a cycle)
 # ─────────────────────────────────────────────
 def _source_modules():
-    from .sources import wms, xyz, wmts
-    return (xyz, wmts, wms)
+    from .sources import wms, xyz, wmts, gdal_raster
+    return (xyz, wmts, wms, gdal_raster)
 
 
 def source_for(layer):
@@ -360,10 +360,20 @@ class TileQueue:
             requeued = self._c.execute(
                 "UPDATE tiles SET status='pending', attempts=0, last_error=NULL "
                 "WHERE status='failed'").rowcount
-            if requeued:
+            # Also re-queue 'done' tiles whose cached file has gone missing (cache
+            # cleared/moved, or a partial cleanup); otherwise the run would finish
+            # with nothing to mosaic and fail with "No tiles downloaded".
+            missing = [(tid,) for tid, fp in self._c.execute(
+                           "SELECT id, file_path FROM tiles WHERE status='done'")
+                       if not fp or not os.path.exists(fp)]
+            if missing:
+                self._c.executemany(
+                    "UPDATE tiles SET status='pending', attempts=0, last_error=NULL "
+                    "WHERE id=?", missing)
+            if requeued or missing:
                 self.logger.info(
-                    "Resuming queue; re-queued %d previously-failed tile(s) for retry.",
-                    requeued)
+                    "Resuming queue; re-queued %d failed and %d missing tile(s) for retry.",
+                    requeued, len(missing))
             else:
                 self.logger.info("Resuming existing queue (fingerprint=%s).", stored_fp)
             return
@@ -430,7 +440,7 @@ def fingerprint(source, params, opts, extent_wkt, extent_crs):
 # MOSAIC
 # ─────────────────────────────────────────────
 def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
-                 resample="bilinear", cutline=None):
+                 resample="bilinear", cutline=None, add_alpha=True, nodata=None):
     if gdal is None:
         raise DownloaderError("GDAL Python bindings unavailable; cannot build mosaic.")
     if not tile_paths:
@@ -443,8 +453,15 @@ def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
         os.makedirs(out_dir, exist_ok=True)
 
     logger.info("BuildVRT from %d tiles → %s", len(tile_paths), vrt)
-    ds = gdal.BuildVRT(vrt, tile_paths,
-                       options=gdal.BuildVRTOptions(resampleAlg="nearest", addAlpha=True))
+    # RGB tiles get an alpha band for transparency; single-band data (e.g. a DTM)
+    # instead carries its nodata value, so QGIS doesn't stretch over fill pixels.
+    vrt_opts = dict(resampleAlg="nearest")
+    if add_alpha:
+        vrt_opts["addAlpha"] = True
+    elif nodata is not None:
+        vrt_opts["srcNodata"] = nodata
+        vrt_opts["VRTNodata"] = nodata
+    ds = gdal.BuildVRT(vrt, tile_paths, options=gdal.BuildVRTOptions(**vrt_opts))
     if ds is None:
         raise DownloaderError("gdal.BuildVRT failed.")
     ds = None
@@ -458,6 +475,8 @@ def build_mosaic(tile_paths, work_dir, logger, tif_path, native_crs, out_crs,
     if reproject or cutline:
         warp_kwargs = dict(format="GTiff", dstSRS=out_crs, resampleAlg=warp_alg,
                            creationOptions=creation, multithread=True)
+        if not add_alpha and nodata is not None:
+            warp_kwargs.update(srcNodata=nodata, dstNodata=nodata)
         if cutline:
             warp_kwargs.update(cutlineDSName=cutline, cropToCutline=True)
         logger.info("Warp VRT → %s (%s → %s, resample=%s%s)",
@@ -660,15 +679,30 @@ class BasemapTileDownloadTask(QgsTask):
             self.summary = {"total": total,
                             "done":   final_counts.get("done", 0),
                             "failed": final_counts.get("failed", 0)}
-            logger.info("All tiles resolved: %s", final_counts)
+            n_done, n_failed = final_counts.get("done", 0), final_counts.get("failed", 0)
+            if n_failed:
+                logger.warning(
+                    "Queue drained: %d of %d tiles downloaded, %d failed after "
+                    "exhausting their retries. The mosaic will have gaps there; "
+                    "re-run with the same settings to retry only the failed tiles.",
+                    n_done, total, n_failed)
+            else:
+                logger.info("Queue drained: all %d tiles downloaded.", total)
             tile_paths = queue.done_file_paths()
             if not tile_paths:
                 raise DownloaderError("No tiles downloaded; cannot build mosaic.")
 
             cutline = self._build_cutline(extent_geom, logger) if self._clip else None
+            # A source may ask to preserve a nodata value (single-band) instead of
+            # adding an alpha band (RGB); default is add-alpha, as before.
+            hints = {}
+            get_hints = getattr(self._source, "mosaic_hints", None)
+            if callable(get_hints):
+                hints = get_hints(self._params, self._opts) or {}
             vrt_path, tif_path = build_mosaic(
                 tile_paths, self.work_dir, logger, self._output_path,
-                self._native_crs, self._out_crs, self._resample, cutline)
+                self._native_crs, self._out_crs, self._resample, cutline,
+                add_alpha=hints.get("add_alpha", True), nodata=hints.get("nodata"))
             self.result_tif_path = tif_path
 
             if CLEANUP_TILES_AFTER_MOSAIC:
@@ -766,7 +800,7 @@ def run(layer=None, extent=None, extent_crs=None, opts=None, out_crs=None,
 
     source = source_for(layer)
     if source is None:
-        msg = "Selected layer is not a recognised WMS/WMTS/XYZ tile layer."
+        msg = "Selected layer is not a recognised WMS/WMTS/XYZ or local raster (GeoTIFF) layer."
         QgsMessageLog.logMessage(msg, LOG_TAB, Qgis.Critical)
         print(f"[Basemap Tile Downloader] ERROR: {msg}")
         return None

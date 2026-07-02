@@ -2,9 +2,10 @@
 """
 Basemap Tile Downloader – parameter dialog.
 
-One layer combo (WMS + XYZ tile layers). The source type is auto-detected from
-the chosen layer, and the relevant parameter fields are shown: tile size +
-resolution for WMS, zoom level for XYZ.
+One layer combo (WMS/WMTS/XYZ tile layers plus local GDAL rasters such as
+GeoTIFF). The source type is auto-detected from the chosen layer, and the
+relevant parameter fields are shown: tile size + resolution for WMS and local
+rasters, zoom level for XYZ/WMTS.
 """
 
 import math
@@ -95,14 +96,14 @@ class BasemapTileDialog(QDialog):
 
         form = QFormLayout()
 
-        # One combo for both source types: raster layers minus anything that
-        # isn't a recognised WMS/XYZ source.
+        # One combo for every source type: raster layers minus anything that
+        # isn't a recognised WMS/WMTS/XYZ or local (GDAL) raster.
         self.layer_combo = QgsMapLayerComboBox()
         self.layer_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
         self.layer_combo.setAllowEmptyLayer(True)
         self._restrict_to_sources()
         self.layer_combo.layerChanged.connect(self._on_layer_changed)
-        form.addRow("Source layer (WMS/WMTS/XYZ):", self.layer_combo)
+        form.addRow("Source layer (WMS/WMTS/XYZ/GeoTIFF):", self.layer_combo)
 
         # Extent selector like QGIS's "Convert Map to Raster" dialog: a dropdown
         # (Calculate from Layer / Use Current Map Canvas Extent / …) plus the
@@ -197,10 +198,10 @@ class BasemapTileDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addWidget(advanced)
-        note = QLabel("WMS is requested at the chosen resolution/CRS; XYZ/WMTS "
-                      "tiles are fetched in their native CRS at the chosen zoom "
-                      "and reprojected to the output CRS. Changing the parameters "
-                      "or extent starts a fresh download.")
+        note = QLabel("WMS and local rasters (e.g. GeoTIFF) are read at the chosen "
+                      "resolution/CRS; XYZ/WMTS tiles are fetched in their native "
+                      "CRS at the chosen zoom and reprojected to the output CRS. "
+                      "Changing the parameters or extent starts a fresh run.")
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addWidget(buttons)
@@ -226,10 +227,11 @@ class BasemapTileDialog(QDialog):
 
     def _on_layer_changed(self, *args):
         name = self._current_source_name()
-        is_wms  = (name == "WMS")
+        # WMS and local rasters (GeoTIFF) use tile-size + resolution.
+        is_grid = name in ("WMS", "GeoTIFF")
         is_zoom = name in ("XYZ", "WMTS")       # both address tiles by zoom level
-        self._set_row_visible(self.tile_lbl, self.tile_spin, is_wms)
-        self._set_row_visible(self.res_lbl,  self.res_spin,  is_wms)
+        self._set_row_visible(self.tile_lbl, self.tile_spin, is_grid)
+        self._set_row_visible(self.res_lbl,  self.res_spin,  is_grid)
         self._set_row_visible(self.zoom_lbl, self.zoom_spin, is_zoom)
         # The m/px note only applies to XYZ's fixed Web-Mercator grid.
         self._set_row_visible(self.zoom_res_lbl, self.zoom_res_info, name == "XYZ")
@@ -244,6 +246,11 @@ class BasemapTileDialog(QDialog):
                 params = src.extract_params(layer)
                 self.crs_widget.setCrs(
                     QgsCoordinateReferenceSystem(src.default_out_crs(params)))
+                # Default a local raster's resolution to its native pixel size.
+                if name == "GeoTIFF":
+                    nres = params.get("native_res")
+                    if nres and self.res_spin.minimum() <= nres <= self.res_spin.maximum():
+                        self.res_spin.setValue(nres)
             except Exception:
                 pass
             self.conc_spin.setValue(getattr(src, "CONCURRENCY", DEFAULT_CONCURRENCY))
@@ -317,7 +324,7 @@ class BasemapTileDialog(QDialog):
                     bb.xMinimum(), bb.yMinimum(), bb.xMaximum(), bb.yMaximum(),
                     self.zoom_spin.value())
                 return (xmax - xmin + 1) * (ymax - ymin + 1)
-            if name == "WMS":
+            if name in ("WMS", "GeoTIFF"):
                 params = engine.source_for(layer).extract_params(layer)   # no network
                 bb = self._extent_bbox_in(QgsCoordinateReferenceSystem(params["crs"]))
                 if bb is None:
@@ -443,7 +450,7 @@ class BasemapTileDialog(QDialog):
     def values(self):
         layer = self.layer_combo.currentLayer()
         name  = self._current_source_name()
-        if name == "WMS":
+        if name in ("WMS", "GeoTIFF"):
             opts = {"tile_pixels": self.tile_spin.value(),
                     "resolution":  self.res_spin.value()}
         elif name in ("XYZ", "WMTS"):

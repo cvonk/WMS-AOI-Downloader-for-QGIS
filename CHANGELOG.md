@@ -5,6 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-01
+### Fixed
+- A resumed run now re-fetches tiles that the queue marked `done` but whose
+  cached file has gone missing (cache cleared/moved), instead of failing with
+  "No tiles downloaded; cannot build mosaic".
+### Added
+- Local raster support: a layer backed by a file (GeoTIFF, etc. — the GDAL
+  provider) can now be used as the source. There's nothing to download; the
+  raster is read over the chosen extent at the chosen resolution and run through
+  the same reproject/crop/mosaic pipeline. Resolution defaults to the raster's
+  native pixel size. Single-band rasters (e.g. a DTM) keep their nodata value
+  through the mosaic (instead of gaining an alpha band), so the exported clip
+  renders the same as the source rather than being re-stretched by QGIS.
+### Changed
+- Clearer end-of-run log line: the misleading "All tiles resolved" is now
+  "Queue drained: N of M tiles downloaded, K failed …" (logged as a warning when
+  any tiles failed), so a run with failures is no longer reported like a success.
+
 ## [1.3.2] - 2026-07-01
 ### Changed
 - The `download.log` is now truncated at the start of each run instead of being
